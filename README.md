@@ -1,4 +1,4 @@
-# 🎯 Cuarta Entrega – Visualización e Integración (Altair + Streamlit)
+# 🎯 Proyecto de Futbol – Visualización e Integración (Altair + Streamlit)
 
 Este proyecto integra los resultados de análisis y modelado realizados en etapas anteriores.  
 Incluye **visualizaciones interactivas** con Altair y una **aplicación en Streamlit** que permite explorar los datos y **probar el modelo entrenado** con nuevos inputs.
