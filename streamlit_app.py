@@ -28,11 +28,51 @@ def load_data(path):
 
 # Nota: ya no se necesita normalizar nombres de equipos — el CSV viene correcto
 
-DATA_PATH = 'data/df_grid_procesado.csv'
-df = load_data(DATA_PATH)
+# Placeholder for df; will cargar según la elección de modelo más abajo
+df = None
 
 st.title("Proyecto de Futbol – Visualización e Integración")
 st.caption("Altair + Streamlit • Exploración y prueba de modelo")
+
+# Selección global de modelo/dataset (afecta los CSVs que se cargan)
+MODEL_CSV_MAP = {
+    'Gradiente': 'df_grid_procesado_gradiente.csv',
+    'Regresion': 'df_grid_procesado_regresion.csv',
+    'Ridge': 'df_grid_procesado_ridge.csv'
+}
+MODEL_FILE_MAP = {
+    'Gradiente': 'modelo_final_gradiente.pkl',
+    'Regresion': 'modelo_final_regresion.pkl',
+    'Ridge': 'modelo_final_ridge.pkl'
+}
+
+model_choice = st.selectbox('Seleccioná el tipo de modelo/dataset', list(MODEL_CSV_MAP.keys()))
+DATA_PATH = os.path.join('data', MODEL_CSV_MAP[model_choice])
+df = load_data(DATA_PATH)
+
+# ensure session_state key for model exists so we can persist it across reruns
+if 'model' not in st.session_state:
+    st.session_state['model'] = None
+
+# Intent: cargar automáticamente el modelo asociado al tipo seleccionado.
+# No mostramos mensajes todavía; los guardamos y los mostramos solo dentro de la pestaña "Probar modelo".
+model = None
+default_fname = MODEL_FILE_MAP.get(model_choice)
+model_paths_to_try = [os.path.join('models', default_fname), default_fname]
+model_loaded_path = None
+model_load_messages = []
+for p in model_paths_to_try:
+    if p and os.path.exists(p):
+        try:
+            model = joblib.load(p)
+            model_loaded_path = p
+            # persist model in session_state so it survives reruns
+            st.session_state['model'] = model
+            break
+        except Exception as e:
+            model_load_messages.append(f"Encontré '{p}' pero no pude cargarlo: {e}")
+if model_loaded_path is None:
+    model_load_messages.append(f"No se encontró el archivo de modelo local '{default_fname}'. Colocá el .pkl en la carpeta 'models/' o en la raíz del proyecto con ese nombre para que se cargue automáticamente.")
 
 tab1, tab2, tab3 = st.tabs(["Exploración", "Probar modelo", "Acerca de"])
 
@@ -207,7 +247,7 @@ def _drive_id_from_url(url: str):
     return m.group(1) if m else None
 
 @st.cache_resource(show_spinner=False)
-def load_model_from_drive(url_or_id: str, out_path='model_final.pkl'):
+def load_model_from_drive(url_or_id: str, out_path='modelo_final_gradiente.pkl'):
     import gdown
     file_id = url_or_id if re.fullmatch(r'[A-Za-z0-9_-]{25,}', url_or_id) else _drive_id_from_url(url_or_id)
     if not file_id:
@@ -268,20 +308,14 @@ def build_one_row(df_full, feat_names, overrides: dict):
 # TAB 2: PROBAR MODELO
 # =========================
 with tab2:
-    st.subheader("Cargar modelo desde Google Drive")
-    url = st.text_input(
-        "Pega aquí la URL de tu modelo_final.pkl",
-        value="https://drive.google.com/file/d/1SQxsnPBVLwT7k5haGEfcQhdP4oyUCE1Y/view?usp=drive_link"
-    )
-    load_btn = st.button("Cargar modelo")
-    model = None
-    if load_btn:
-        with st.spinner("Descargando y cargando el modelo..."):
-            try:
-                model = load_model_from_drive(url)
-                st.success("Modelo cargado.")
-            except Exception as e:
-                st.error(f"No pude cargar el modelo: {e}")
+    st.subheader("Modelo seleccionado")
+    # Mostrar estado del intento de carga automática realizado al elegir el modelo.
+    if model_loaded_path is not None:
+        st.success(f"Modelo cargado automáticamente: {model_loaded_path}")
+    else:
+        # mostrar cualquier mensaje recolectado (por ejemplo: errores al abrir archivos existentes)
+        for m in model_load_messages:
+            st.warning(m)
 
     st.markdown("### Ingresar datos nuevos")
     st.caption("Completá algunos features clave (incluye equipos). El resto se completa con valores típicos del dataset.")
@@ -362,9 +396,27 @@ with tab2:
                 st.error("No se puede predecir: el equipo local y visitante deben ser diferentes.")
                 raise SystemExit()
 
-            # si el user no apretó "Cargar modelo" antes
+            # Si no hay modelo cargado, intentar cargar el archivo por defecto (models/ -> raíz)
             if model is None:
-                model = load_model_from_drive(url)
+                default_fname = MODEL_FILE_MAP.get(model_choice)
+                tried = False
+                for p in [os.path.join('models', default_fname), default_fname]:
+                    if p and os.path.exists(p):
+                        try:
+                            model = joblib.load(p)
+                            st.info(f"Modelo cargado desde: {p}")
+                            tried = True
+                            break
+                        except Exception as e:
+                            st.warning(f"Encontré '{p}' pero no pude cargarlo: {e}")
+                            tried = True
+                if not tried:
+                    st.error(f"No se cargó ningún modelo. Colocá el archivo '{default_fname}' en 'models/' o en la raíz del proyecto.")
+                    raise
+
+            # use model from session_state if present
+            if st.session_state.get('model') is not None:
+                model = st.session_state.get('model')
 
             # columnas esperadas por el modelo
             feat = infer_feature_names(model, df.columns)
@@ -391,15 +443,55 @@ with tab2:
             y_pred = model.predict(X)[0]
             st.success(f"Predicción: **{y_pred}**")
 
-            # probabilidades, si existen
+            # probabilidades, si existen (mostrar en formato 'Local / Empate / Visitante' cuando sea posible)
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X)[0]
-                if hasattr(model, "classes_"):
-                    proba_df = pd.DataFrame({"clase": model.classes_, "prob": proba})
+                classes = list(getattr(model, "classes_", list(range(len(proba)))))
+                proba_df = pd.DataFrame({"clase": classes, "prob": proba})
+
+                # intentar interpretar etiquetas para mostrar prob. Local/Empate/Visitante
+                def interpret_label(cls):
+                    s = str(cls).lower()
+                    if any(k in s for k in ("local", "home", "casa")):
+                        return "Local"
+                    if any(k in s for k in ("visit", "away", "fuera")):
+                        return "Visitante"
+                    if any(k in s for k in ("draw", "empate", "tie")):
+                        return "Empate"
+                    return None
+
+                mapped = [interpret_label(c) for c in classes]
+                if any(m is not None for m in mapped):
+                    agg = {"Local": 0.0, "Empate": 0.0, "Visitante": 0.0}
+                    for cls, p, m in zip(classes, proba, mapped):
+                        if m is None:
+                            continue
+                        agg[m] += float(p)
+
+                    # mostrar probabilidades con nombres de equipos
+                    local_name = user_vals.get('equipo_local_norm', 'Local')
+                    visit_name = user_vals.get('equipo_visitante_norm', 'Visitante')
+                    st.write(f"Probabilidad que {local_name} (Local) gane: {agg['Local']:.1%}")
+                    st.write(f"Probabilidad de empate: {agg['Empate']:.1%}")
+                    st.write(f"Probabilidad que {visit_name} (Visitante) gane: {agg['Visitante']:.1%}")
+
+                    prob_display_df = pd.DataFrame({"resultado": [f"{local_name} (Local)", "Empate", f"{visit_name} (Visitante)"],
+                                                    "prob": [agg['Local'], agg['Empate'], agg['Visitante']]})
+                    st.altair_chart(
+                        alt.Chart(prob_display_df).mark_bar().encode(x='resultado:N', y='prob:Q', tooltip=['resultado','prob']),
+                        use_container_width=True
+                    )
+                else:
+                    # fallback: mostrar probabilidades por clase tal como las devuelve el modelo
+                    proba_df['prob_pct'] = (proba_df['prob'] * 100).round(1).astype(str) + '%'
+                    st.write("Probabilidades por clase:")
+                    st.table(proba_df)
                     st.altair_chart(
                         alt.Chart(proba_df).mark_bar().encode(x='clase:N', y='prob:Q', tooltip=['clase','prob']),
                         use_container_width=True
                     )
+            else:
+                st.info("El modelo no provee probabilidades (no implementa predict_proba). Se muestra la predicción númerica o de clase.")
         except Exception as e:
             st.error(f"Error al predecir: {e}")
 
@@ -408,9 +500,9 @@ with tab2:
 # =========================
 with tab3:
     st.markdown("""
-**Datos**: `data/datos_procesados_modelo_v2.csv`  
+**Datos**: `data/df_grid_procesado_gradiente.csv`  
 **Visualizaciones**: Altair (interactivas, comparables, y con facetado)  
-**Modelo**: se carga desde Google Drive y se prueba con inputs del usuario.
+**Modelo**: se intenta cargar automáticamente el archivo local asociado al tipo de modelo (p. ej. `modelo_final_gradiente.pkl`). Si no está presente, colocá el .pkl en `models/` o en la raíz del proyecto.
 
 > Consejo: fijá en `requirements.txt` la **misma versión de scikit-learn** e **imbalanced-learn** con la que entrenaste el modelo para evitar incompatibilidades al cargar el .pkl.
 """)
