@@ -24,6 +24,24 @@ def load_data(path):
         df['delta_possession'] = df['local_lastN_possession_avg'] - df['visitante_lastN_possession_avg']
     return df
 
+
+def _normalize_team_name(name: str):
+    """
+    Normaliza un nombre de equipo eliminando sufijos numéricos como:
+    - "aldosivi 2" -> "aldosivi"
+    - "all boys 3" -> "all boys"
+    - "Equipo (2)" -> "Equipo"
+    Mantiene el resto del texto igual y elimina espacios sobrantes.
+    """
+    if not isinstance(name, str):
+        return name
+    s = name.strip()
+    # eliminar formas: ' (2)'
+    s = re.sub(r"\s*\(\s*\d+\s*\)$", "", s)
+    # eliminar sufijo numérico con posible guion/espacio: ' - 2' o ' 2'
+    s = re.sub(r"[\s\-]+\d+$", "", s)
+    return s.strip()
+
 DATA_PATH = 'data/datos_procesados_modelo_v2.csv'
 df = load_data(DATA_PATH)
 
@@ -38,7 +56,8 @@ tab1, tab2, tab3 = st.tabs(["Exploración", "Probar modelo", "Acerca de"])
 with tab1:
     # valores para filtro por equipo
     if {'equipo_local_norm','equipo_visitante_norm'}.issubset(df.columns):
-        equipos = sorted(set(df['equipo_local_norm']).union(set(df['equipo_visitante_norm'])))
+        raw = list(df['equipo_local_norm'].dropna().astype(str)) + list(df['equipo_visitante_norm'].dropna().astype(str))
+        equipos = sorted({_normalize_team_name(x) for x in raw})
     else:
         equipos = []
 
@@ -195,7 +214,8 @@ with tab2:
 
     # --- Controles de equipos (categóricos obligatorios del pipeline) ---
     if {'equipo_local_norm','equipo_visitante_norm'}.issubset(df.columns):
-        equipos_all = sorted(set(df['equipo_local_norm']).union(set(df['equipo_visitante_norm'])))
+        raw_all = list(df['equipo_local_norm'].dropna().astype(str)) + list(df['equipo_visitante_norm'].dropna().astype(str))
+        equipos_all = sorted({_normalize_team_name(x) for x in raw_all})
     else:
         equipos_all = []
 
