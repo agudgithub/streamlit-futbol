@@ -52,8 +52,8 @@ with tab1:
     if equipo == '(todos)' or not equipos:
         data = df
     else:
-        # filtrar usando las versiones 'clean' (sin sufijos numéricos)
-        data = df[(df.get('equipo_local_norm_clean') == equipo) | (df.get('equipo_visitante_norm_clean') == equipo)]
+        # filtrar usando los nombres tal cual vienen en el CSV
+        data = df[(df['equipo_local_norm'] == equipo) | (df['equipo_visitante_norm'] == equipo)]
 
     # Chart 1: ventaja winrate vs diferencia de goles
     if {'delta_winrate','diferencia_goles_partido','resultado_texto'}.issubset(data.columns):
