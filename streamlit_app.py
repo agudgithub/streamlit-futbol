@@ -22,27 +22,13 @@ def load_data(path):
         df['delta_winrate'] = df['local_lastN_winrate'] - df['visitante_lastN_winrate']
     if {'local_lastN_possession_avg','visitante_lastN_possession_avg'}.issubset(df.columns):
         df['delta_possession'] = df['local_lastN_possession_avg'] - df['visitante_lastN_possession_avg']
+    # (no normalization needed — CSV tiene nombres finales)
     return df
 
 
-def _normalize_team_name(name: str):
-    """
-    Normaliza un nombre de equipo eliminando sufijos numéricos como:
-    - "aldosivi 2" -> "aldosivi"
-    - "all boys 3" -> "all boys"
-    - "Equipo (2)" -> "Equipo"
-    Mantiene el resto del texto igual y elimina espacios sobrantes.
-    """
-    if not isinstance(name, str):
-        return name
-    s = name.strip()
-    # eliminar formas: ' (2)'
-    s = re.sub(r"\s*\(\s*\d+\s*\)$", "", s)
-    # eliminar sufijo numérico con posible guion/espacio: ' - 2' o ' 2'
-    s = re.sub(r"[\s\-]+\d+$", "", s)
-    return s.strip()
+# Nota: ya no se necesita normalizar nombres de equipos — el CSV viene correcto
 
-DATA_PATH = 'data/datos_procesados_modelo_v2.csv'
+DATA_PATH = 'data/df_grid_procesado.csv'
 df = load_data(DATA_PATH)
 
 st.title("Proyecto de Futbol – Visualización e Integración")
@@ -57,7 +43,7 @@ with tab1:
     # valores para filtro por equipo
     if {'equipo_local_norm','equipo_visitante_norm'}.issubset(df.columns):
         raw = list(df['equipo_local_norm'].dropna().astype(str)) + list(df['equipo_visitante_norm'].dropna().astype(str))
-        equipos = sorted({_normalize_team_name(x) for x in raw})
+        equipos = sorted(set(raw))
     else:
         equipos = []
 
@@ -66,7 +52,8 @@ with tab1:
     if equipo == '(todos)' or not equipos:
         data = df
     else:
-        data = df[(df['equipo_local_norm'] == equipo) | (df['equipo_visitante_norm'] == equipo)]
+        # filtrar usando las versiones 'clean' (sin sufijos numéricos)
+        data = df[(df.get('equipo_local_norm_clean') == equipo) | (df.get('equipo_visitante_norm_clean') == equipo)]
 
     # Chart 1: ventaja winrate vs diferencia de goles
     if {'delta_winrate','diferencia_goles_partido','resultado_texto'}.issubset(data.columns):
@@ -215,7 +202,7 @@ with tab2:
     # --- Controles de equipos (categóricos obligatorios del pipeline) ---
     if {'equipo_local_norm','equipo_visitante_norm'}.issubset(df.columns):
         raw_all = list(df['equipo_local_norm'].dropna().astype(str)) + list(df['equipo_visitante_norm'].dropna().astype(str))
-        equipos_all = sorted({_normalize_team_name(x) for x in raw_all})
+        equipos_all = sorted(set(raw_all))
     else:
         equipos_all = []
 
@@ -304,6 +291,8 @@ with tab2:
                 st.write("Algunas (primeras 30):", feat[:30])
                 if missing_in_df:
                     st.warning(f"Columnas esperadas que no están en el CSV: {missing_in_df}")
+
+            # construir fila 1xN (usamos los nombres tal cual vienen del CSV)
 
             # construir fila 1xN
             row = build_one_row(df, feat, user_vals)
