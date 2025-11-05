@@ -491,7 +491,7 @@ with tab2:
             st.warning(m)
 
     st.markdown("### Ingresar datos nuevos")
-    st.caption("Completá algunos features clave (incluye equipos). El resto se completa con valores típicos del dataset.")
+    st.caption("Se completan los datos con los preprocesados.")
 
     # --- Controles de equipos (categóricos obligatorios del pipeline) ---
     if {'equipo_local_norm','equipo_visitante_norm'}.issubset(df.columns):
