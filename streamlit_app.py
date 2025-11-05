@@ -197,7 +197,7 @@ with tab2:
     st.subheader("Cargar modelo desde Google Drive")
     url = st.text_input(
         "Pega aquí la URL de tu modelo_final.pkl",
-        value="https://drive.google.com/file/d/1nypgIlyosdGE-WCcH_EKDyMhd-oFGTWm/view?usp=drive_link"
+        value="https://drive.google.com/file/d/1SQxsnPBVLwT7k5haGEfcQhdP4oyUCE1Y/view?usp=drive_link"
     )
     load_btn = st.button("Cargar modelo")
     model = None
@@ -254,11 +254,32 @@ with tab2:
         if sel_visit == "(No hay otro equipo disponible)":
             teams_different = False
             st.error("No es posible seleccionar el mismo equipo como visitante. Añadí más equipos al dataset o usa otro CSV.")
-    colA, colB = st.columns(2)
-    for i, c in enumerate(cols_simple):
-        w = colA if i % 2 == 0 else colB
-        default = float(med.get(c, 0.0)) if c in med else 0.0
-        user_vals[c] = w.number_input(c, value=default)
+
+    # Opciones avanzadas: por defecto están ocultas. Solo se usan si el usuario marca 'usar_advanced'.
+    advanced_defaults = {
+        'local_lastN_winrate': 0.42,
+        'local_lastN_goals_for': 0.31,
+        'local_lastN_possession_avg': 0.82,
+        'local_lastN_remates_puerta': 0.35,
+        'visitante_lastN_winrate': 0.40,
+        'visitante_lastN_goals_for': 0.36,
+        'visitante_lastN_possession_avg': 0.83,
+        'visitante_lastN_remates_puerta': 0.40
+    }
+
+    advanced_values = {}
+    with st.expander("Opciones avanzadas", expanded=False):
+        use_advanced = st.checkbox("Usar opciones avanzadas para la predicción", value=False)
+        colA, colB = st.columns(2)
+        for i, c in enumerate(cols_simple):
+            w = colA if i % 2 == 0 else colB
+            default = float(advanced_defaults.get(c, med.get(c, 0.0)))
+            # mostrar el control pero no aplicarlo hasta que use_advanced sea True
+            advanced_values[c] = w.number_input(c, value=default)
+
+    # si el usuario eligió usar opciones avanzadas, incorporarlas a user_vals
+    if 'use_advanced' in locals() and use_advanced:
+        user_vals.update(advanced_values)
 
     if st.button("Predecir"):
         try:
