@@ -47,12 +47,13 @@ with tab1:
     else:
         equipos = []
 
-    equipo = st.selectbox("Filtrar por equipo (local o visitante)", ['(todos)'] + equipos if equipos else ['(todos)'])
-
-    if equipo == '(todos)' or not equipos:
+    if not equipos:
+        st.info("No hay equipos disponibles en el CSV para filtrar.")
         data = df
+        equipo = None
     else:
-        # filtrar usando los nombres tal cual vienen en el CSV
+        # Ya no mostramos la opción '(todos)'; el usuario debe elegir un equipo
+        equipo = st.selectbox("Elegí un equipo", equipos)
         data = df[(df['equipo_local_norm'] == equipo) | (df['equipo_visitante_norm'] == equipo)]
 
     # Chart 1: ventaja winrate vs diferencia de goles
@@ -69,48 +70,134 @@ with tab1:
     else:
         st.info("Faltan columnas para el Chart 1 (delta_winrate, diferencia_goles_partido, resultado_texto).")
 
-    # ECDF: distribución de goles por resultado
-    if {'total_goles_partido','resultado_texto'}.issubset(data.columns):
-        base = data[['total_goles_partido','resultado_texto']].dropna().copy().sort_values('total_goles_partido')
-        ecdf = (alt.Chart(base)
-            .transform_window(
-                sort=[{'field':'total_goles_partido'}],
-                frame=[None, 0],
-                cumulative_count='count(*)'
-            )
-            .transform_joinaggregate(total='count(*)', groupby=['resultado_texto'])
-            .transform_calculate(p='datum.cumulative_count / datum.total')
-            .mark_line(point=True)
-            .encode(
-                x=alt.X('total_goles_partido:Q', title='Goles'),
-                y=alt.Y('p:Q', title='Proporción acumulada'),
-                color=alt.Color('resultado_texto:N', title='Resultado'),
-                tooltip=['total_goles_partido:Q','p:Q','resultado_texto:N']
-            ).properties(height=340, title='ECDF: Goles por resultado'))
-        st.altair_chart(ecdf, use_container_width=True)
+    # --- Eficiencia Local vs Eficiencia Visitante facetado por Resultado ---
+    needed = {
+        'resultado_texto',
+        'local_lastN_goals_for','local_lastN_remates_puerta',
+        'visitante_lastN_goals_for','visitante_lastN_remates_puerta'
+    }
+
+    if not needed.issubset(df.columns):
+        st.info("Faltan columnas para el gráfico de comparación de eficiencia (ver goles/remates locales y visitantes).")
+    elif equipo is None:
+        st.info("Seleccioná un equipo para ver los gráficos de eficiencia cuando fue local y cuando fue visitante.")
     else:
-        st.info("Faltan columnas para el ECDF (total_goles_partido, resultado_texto).")
+        # Cuando el equipo fue LOCAL
+        data_local = df[df['equipo_local_norm'] == equipo]
+        if data_local.empty:
+            st.info(f"No hay partidos donde {equipo} haya sido LOCAL.")
+        else:
+            eff_local = (alt.Chart(data_local)
+                .transform_calculate(
+                    local_eff_raw = "datum.local_lastN_remates_puerta > 0 ? datum.local_lastN_goals_for / datum.local_lastN_remates_puerta : null",
+                    visit_eff_raw = "datum.visitante_lastN_remates_puerta > 0 ? datum.visitante_lastN_goals_for / datum.visitante_lastN_remates_puerta : null",
+                    local_eff = "datum.local_eff_raw > 1 ? 1 : datum.local_eff_raw",
+                    visit_eff = "datum.visit_eff_raw > 1 ? 1 : datum.visit_eff_raw"
+                )
+                .transform_filter("isValid(datum.local_eff) && isValid(datum.visit_eff)")
+            )
+
+            chart_eff_local = (
+                eff_local.mark_circle(opacity=0.6, size=80)
+                .encode(
+                    x=alt.X('local_eff:Q', title='Eficiencia Local (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
+                    y=alt.Y('visit_eff:Q', title='Eficiencia Visitante (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
+                    tooltip=[
+                        alt.Tooltip('equipo_local_norm:N', title='Equipo Local'),
+                        alt.Tooltip('equipo_visitante_norm:N', title='Equipo Visitante'),
+                        alt.Tooltip('local_eff:Q', title='Eficiencia Local', format='.2f'),
+                        alt.Tooltip('visit_eff:Q', title='Eficiencia Visitante', format='.2f'),
+                        alt.Tooltip('resultado_texto:N', title='Resultado')
+                    ]
+                )
+                .properties(width=250, height=250)
+                .facet(
+                    column=alt.Column('resultado_texto:N', title='Resultado del Partido'),
+                    title=f'Eficiencia Local vs Visitante (partidos donde {equipo} fue LOCAL)'
+                )
+            )
+            st.altair_chart(chart_eff_local, use_container_width=True)
+
+        # Cuando el equipo fue VISITANTE
+        data_visit = df[df['equipo_visitante_norm'] == equipo]
+        if data_visit.empty:
+            st.info(f"No hay partidos donde {equipo} haya sido VISITANTE.")
+        else:
+            eff_visit = (alt.Chart(data_visit)
+                .transform_calculate(
+                    local_eff_raw = "datum.local_lastN_remates_puerta > 0 ? datum.local_lastN_goals_for / datum.local_lastN_remates_puerta : null",
+                    visit_eff_raw = "datum.visitante_lastN_remates_puerta > 0 ? datum.visitante_lastN_goals_for / datum.visitante_lastN_remates_puerta : null",
+                    local_eff = "datum.local_eff_raw > 1 ? 1 : datum.local_eff_raw",
+                    visit_eff = "datum.visit_eff_raw > 1 ? 1 : datum.visit_eff_raw"
+                )
+                .transform_filter("isValid(datum.local_eff) && isValid(datum.visit_eff)")
+            )
+
+            chart_eff_visit = (
+                eff_visit.mark_circle(opacity=0.6, size=80)
+                .encode(
+                    x=alt.X('local_eff:Q', title='Eficiencia Local (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
+                    y=alt.Y('visit_eff:Q', title='Eficiencia Visitante (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
+                    tooltip=[
+                        alt.Tooltip('equipo_local_norm:N', title='Equipo Local'),
+                        alt.Tooltip('equipo_visitante_norm:N', title='Equipo Visitante'),
+                        alt.Tooltip('local_eff:Q', title='Eficiencia Local', format='.2f'),
+                        alt.Tooltip('visit_eff:Q', title='Eficiencia Visitante', format='.2f'),
+                        alt.Tooltip('resultado_texto:N', title='Resultado')
+                    ]
+                )
+                .properties(width=250, height=250)
+                .facet(
+                    column=alt.Column('resultado_texto:N', title='Resultado del Partido'),
+                    title=f'Eficiencia Local vs Visitante (partidos donde {equipo} fue VISITANTE)'
+                )
+            )
+            st.altair_chart(chart_eff_visit, use_container_width=True)
 
     # Facet: posesión local vs visitante + tendencia
-    if {'local_lastN_possession_avg','visitante_lastN_possession_avg','resultado_texto'}.issubset(data.columns):
-        scatter = (alt.Chart(data).mark_point(opacity=0.45)
-            .encode(
-                x=alt.X('local_lastN_possession_avg:Q', title='Posesión local (prom. N)'),
-                y=alt.Y('visitante_lastN_possession_avg:Q', title='Posesión visitante (prom. N)'),
-                tooltip=['equipo_local_norm:N','equipo_visitante_norm:N','resultado_texto:N',
-                         'local_lastN_possession_avg:Q','visitante_lastN_possession_avg:Q']
-            ).properties(width=260, height=220))
-
-        trend = (alt.Chart(data)
-            .transform_regression('local_lastN_possession_avg', 'visitante_lastN_possession_avg')
-            .mark_line()
-            .encode(x='local_lastN_possession_avg:Q', y='visitante_lastN_possession_avg:Q'))
-
-        facet = (scatter + trend).facet(column=alt.Column('resultado_texto:N', title=''),
-                                        title='Posesión local vs. visitante (facet por resultado)')
-        st.altair_chart(facet, use_container_width=True)
+    if equipo is None:
+        st.info("Seleccioná un equipo para ver los gráficos de posesión desagregados por local/visitante y resultado.")
     else:
-        st.info("Faltan columnas para el facet (posesiones y resultado_texto).")
+        if {'local_lastN_possession_avg','visitante_lastN_possession_avg','resultado_texto'}.issubset(df.columns):
+            # Cuando el equipo fue LOCAL
+            data_local = df[df['equipo_local_norm'] == equipo]
+            scatter_local = (alt.Chart(data_local).mark_point(opacity=0.45)
+                .encode(
+                    x=alt.X('local_lastN_possession_avg:Q', title='Posesión local (prom. N)'),
+                    y=alt.Y('visitante_lastN_possession_avg:Q', title='Posesión visitante (prom. N)'),
+                    tooltip=['equipo_local_norm:N','equipo_visitante_norm:N','resultado_texto:N',
+                             'local_lastN_possession_avg:Q','visitante_lastN_possession_avg:Q']
+                ).properties(width=260, height=220))
+
+            trend_local = (alt.Chart(data_local)
+                .transform_regression('local_lastN_possession_avg', 'visitante_lastN_possession_avg')
+                .mark_line()
+                .encode(x='local_lastN_possession_avg:Q', y='visitante_lastN_possession_avg:Q'))
+
+            facet_local = (scatter_local + trend_local).facet(column=alt.Column('resultado_texto:N', title=''),
+                                                            title=f'Posesión cuando {equipo} fue LOCAL')
+            st.altair_chart(facet_local, use_container_width=True)
+
+            # Cuando el equipo fue VISITANTE
+            data_visit = df[df['equipo_visitante_norm'] == equipo]
+            scatter_visit = (alt.Chart(data_visit).mark_point(opacity=0.45)
+                .encode(
+                    x=alt.X('local_lastN_possession_avg:Q', title='Posesión local (prom. N)'),
+                    y=alt.Y('visitante_lastN_possession_avg:Q', title='Posesión visitante (prom. N)'),
+                    tooltip=['equipo_local_norm:N','equipo_visitante_norm:N','resultado_texto:N',
+                             'local_lastN_possession_avg:Q','visitante_lastN_possession_avg:Q']
+                ).properties(width=260, height=220))
+
+            trend_visit = (alt.Chart(data_visit)
+                .transform_regression('local_lastN_possession_avg', 'visitante_lastN_possession_avg')
+                .mark_line()
+                .encode(x='local_lastN_possession_avg:Q', y='visitante_lastN_possession_avg:Q'))
+
+            facet_visit = (scatter_visit + trend_visit).facet(column=alt.Column('resultado_texto:N', title=''),
+                                                            title=f'Posesión cuando {equipo} fue VISITANTE')
+            st.altair_chart(facet_visit, use_container_width=True)
+        else:
+            st.info("Faltan columnas para el facet (posesiones y resultado_texto).")
 
 # =========================
 # UTIL: Drive downloader
