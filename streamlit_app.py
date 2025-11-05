@@ -200,8 +200,20 @@ with tab2:
         equipos_all = []
 
     c1, c2 = st.columns(2)
-    sel_local = c1.selectbox("equipo_local_norm", equipos_all) if equipos_all else c1.text_input("equipo_local_norm")
-    sel_visit = c2.selectbox("equipo_visitante_norm", equipos_all) if equipos_all else c2.text_input("equipo_visitante_norm")
+    # Si tenemos lista de equipos, evitamos que el visitante pueda ser el mismo que el local
+    if equipos_all:
+        sel_local = c1.selectbox("equipo_local_norm", equipos_all)
+        visit_options = [e for e in equipos_all if e != sel_local]
+        if visit_options:
+            sel_visit = c2.selectbox("equipo_visitante_norm", visit_options)
+        else:
+            # Caso raro: solo hay un equipo en la lista
+            sel_visit = c2.selectbox("equipo_visitante_norm", ["(No hay otro equipo disponible)"])
+            st.warning("No hay otro equipo distinto disponible para seleccionar como visitante.")
+    else:
+        # fallback a text inputs (validación se hará antes de predecir)
+        sel_local = c1.text_input("equipo_local_norm")
+        sel_visit = c2.text_input("equipo_visitante_norm")
 
     # --- Controles numéricos básicos ---
     cols_simple = [
@@ -212,6 +224,16 @@ with tab2:
     ]
     med = df.median(numeric_only=True).to_dict()
     user_vals = {'equipo_local_norm': sel_local, 'equipo_visitante_norm': sel_visit}
+
+    # Validación en caliente: mostrar aviso si los equipos son iguales (o placeholder)
+    teams_different = True
+    if isinstance(sel_local, str) and isinstance(sel_visit, str):
+        if sel_local.strip() == sel_visit.strip():
+            teams_different = False
+            st.error("El equipo local y el equipo visitante deben ser diferentes. Por favor corregí la selección.")
+        if sel_visit == "(No hay otro equipo disponible)":
+            teams_different = False
+            st.error("No es posible seleccionar el mismo equipo como visitante. Añadí más equipos al dataset o usa otro CSV.")
     colA, colB = st.columns(2)
     for i, c in enumerate(cols_simple):
         w = colA if i % 2 == 0 else colB
@@ -220,6 +242,11 @@ with tab2:
 
     if st.button("Predecir"):
         try:
+            # bloquear predicción si equipos iguales
+            if not teams_different:
+                st.error("No se puede predecir: el equipo local y visitante deben ser diferentes.")
+                raise SystemExit()
+
             # si el user no apretó "Cargar modelo" antes
             if model is None:
                 model = load_model_from_drive(url)
