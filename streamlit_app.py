@@ -27,7 +27,7 @@ def load_data(path):
 DATA_PATH = 'data/datos_procesados_modelo_v2.csv'
 df = load_data(DATA_PATH)
 
-st.title("Cuarta Entrega – Visualización e Integración")
+st.title("Proyecto de Futbol – Visualización e Integración")
 st.caption("Altair + Streamlit • Exploración y prueba de modelo")
 
 tab1, tab2, tab3 = st.tabs(["Exploración", "Probar modelo", "Acerca de"])
