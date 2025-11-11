@@ -46,33 +46,15 @@ MODEL_FILE_MAP = {
     'Ridge': 'modelo_final_ridge.pkl'
 }
 
-model_choice = st.selectbox('Seleccioná el tipo de modelo/dataset', list(MODEL_CSV_MAP.keys()))
-DATA_PATH = os.path.join('data', MODEL_CSV_MAP[model_choice])
+# Cargar dataset por defecto (para la exploración). El selector de modelo/dataset
+# fue movido a la pestaña 'Probar modelo' para no interferir la exploración.
+DEFAULT_MODEL_CHOICE = 'Gradiente'
+DATA_PATH = os.path.join('data', MODEL_CSV_MAP[DEFAULT_MODEL_CHOICE])
 df = load_data(DATA_PATH)
 
-# ensure session_state key for model exists so we can persist it across reruns
+# asegurar existencia de session_state para el modelo
 if 'model' not in st.session_state:
     st.session_state['model'] = None
-
-# Intent: cargar automáticamente el modelo asociado al tipo seleccionado.
-# No mostramos mensajes todavía; los guardamos y los mostramos solo dentro de la pestaña "Probar modelo".
-model = None
-default_fname = MODEL_FILE_MAP.get(model_choice)
-model_paths_to_try = [os.path.join('models', default_fname), default_fname]
-model_loaded_path = None
-model_load_messages = []
-for p in model_paths_to_try:
-    if p and os.path.exists(p):
-        try:
-            model = joblib.load(p)
-            model_loaded_path = p
-            # persist model in session_state so it survives reruns
-            st.session_state['model'] = model
-            break
-        except Exception as e:
-            model_load_messages.append(f"Encontré '{p}' pero no pude cargarlo: {e}")
-if model_loaded_path is None:
-    model_load_messages.append(f"No se encontró el archivo de modelo local '{default_fname}'. Colocá el .pkl en la carpeta 'models/' o en la raíz del proyecto con ese nombre para que se cargue automáticamente.")
 
 tab1, tab2, tab3 = st.tabs(["Exploración", "Probar modelo", "Acerca de"])
 
@@ -110,134 +92,118 @@ with tab1:
     else:
         st.info("Faltan columnas para el Chart 1 (delta_winrate, diferencia_goles_partido, resultado_texto).")
 
-    # --- Eficiencia Local vs Eficiencia Visitante facetado por Resultado ---
-    needed = {
-        'resultado_texto',
-        'local_lastN_goals_for','local_lastN_remates_puerta',
-        'visitante_lastN_goals_for','visitante_lastN_remates_puerta'
-    }
+    # --- UNIFICADO: gráfico parametrizable (Eficiencia / Posesión) ---
+    st.markdown("### Visualización parametrizable: Eficiencia / Posesión")
+    metric = st.selectbox("Métrica a visualizar", ["Eficiencia", "Posesión"])
+    side = st.selectbox("Filtrar por lado del equipo seleccionado", ["Ambos", "Local", "Visitante"])
+
+    # chequear columnas necesarias según métrica
+    if metric == "Eficiencia":
+        needed = {
+            'resultado_texto',
+            'local_lastN_goals_for','local_lastN_remates_puerta',
+            'visitante_lastN_goals_for','visitante_lastN_remates_puerta'
+        }
+    else:  # Posesión
+        needed = {
+            'resultado_texto',
+            'local_lastN_possession_avg','visitante_lastN_possession_avg'
+        }
 
     if not needed.issubset(df.columns):
-        st.info("Faltan columnas para el gráfico de comparación de eficiencia (ver goles/remates locales y visitantes).")
+        st.info(f"Faltan columnas necesarias para '{metric}'. Columnas requeridas: {sorted(needed)}")
     elif equipo is None:
-        st.info("Seleccioná un equipo para ver los gráficos de eficiencia cuando fue local y cuando fue visitante.")
+        st.info("Seleccioná un equipo para ver el gráfico parametrizable.")
     else:
-        # Cuando el equipo fue LOCAL
-        data_local = df[df['equipo_local_norm'] == equipo]
-        if data_local.empty:
-            st.info(f"No hay partidos donde {equipo} haya sido LOCAL.")
+        # seleccionar subconjunto según 'side' y 'equipo'
+        if side == "Local":
+            data_sub = df[df['equipo_local_norm'] == equipo].copy()
+            title_side = f"partidos donde {equipo} fue LOCAL"
+        elif side == "Visitante":
+            data_sub = df[df['equipo_visitante_norm'] == equipo].copy()
+            title_side = f"partidos donde {equipo} fue VISITANTE"
         else:
-            eff_local = (alt.Chart(data_local)
-                .transform_calculate(
-                    local_eff_raw = "datum.local_lastN_remates_puerta > 0 ? datum.local_lastN_goals_for / datum.local_lastN_remates_puerta : null",
-                    visit_eff_raw = "datum.visitante_lastN_remates_puerta > 0 ? datum.visitante_lastN_goals_for / datum.visitante_lastN_remates_puerta : null",
-                    local_eff = "datum.local_eff_raw > 1 ? 1 : datum.local_eff_raw",
-                    visit_eff = "datum.visit_eff_raw > 1 ? 1 : datum.visit_eff_raw"
-                )
-                .transform_filter("isValid(datum.local_eff) && isValid(datum.visit_eff)")
-            )
+            data_sub = df[(df['equipo_local_norm'] == equipo) | (df['equipo_visitante_norm'] == equipo)].copy()
+            title_side = f"partidos donde {equipo} fue LOCAL o VISITANTE"
 
-            chart_eff_local = (
-                eff_local.mark_circle(opacity=0.6, size=80)
-                .encode(
-                    x=alt.X('local_eff:Q', title='Eficiencia Local (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
-                    y=alt.Y('visit_eff:Q', title='Eficiencia Visitante (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
-                    tooltip=[
-                        alt.Tooltip('equipo_local_norm:N', title='Equipo Local'),
-                        alt.Tooltip('equipo_visitante_norm:N', title='Equipo Visitante'),
-                        alt.Tooltip('local_eff:Q', title='Eficiencia Local', format='.2f'),
-                        alt.Tooltip('visit_eff:Q', title='Eficiencia Visitante', format='.2f'),
-                        alt.Tooltip('resultado_texto:N', title='Resultado')
-                    ]
-                )
-                .properties(width=250, height=250)
-                .facet(
+        if data_sub.empty:
+            st.info(f"No hay partidos para {title_side}.")
+        else:
+            # preparar columnas para graficar
+            if metric == "Eficiencia":
+                # calcular eficiencia en pandas (evita repetir Altair transform_calculate)
+                def safe_eff(gf_col, rp_col):
+                    gf = pd.to_numeric(data_sub.get(gf_col), errors='coerce').fillna(0)
+                    rp = pd.to_numeric(data_sub.get(rp_col), errors='coerce')
+                    rp = rp.replace(0, np.nan)
+                    eff = gf / rp
+                    eff = eff.clip(upper=1)
+                    return eff
+
+                data_sub['local_eff'] = safe_eff('local_lastN_goals_for', 'local_lastN_remates_puerta')
+                data_sub['visit_eff'] = safe_eff('visitante_lastN_goals_for', 'visitante_lastN_remates_puerta')
+                x_field, y_field = 'local_eff', 'visit_eff'
+                x_title, y_title = 'Eficiencia Local (goles / remates a puerta)', 'Eficiencia Visitante (goles / remates a puerta)'
+                x_scale = alt.Scale(domain=[0,1])
+                y_scale = alt.Scale(domain=[0,1])
+            else:
+                # Posesión (valores ya esperados como promedios)
+                data_sub['local_poss'] = pd.to_numeric(data_sub.get('local_lastN_possession_avg'), errors='coerce')
+                data_sub['visit_poss'] = pd.to_numeric(data_sub.get('visitante_lastN_possession_avg'), errors='coerce')
+
+                # Algunas fuentes guardan posesión como 0-1; si ese es el caso convertir a 0-100
+                max_val = pd.concat([data_sub['local_poss'].dropna(), data_sub['visit_poss'].dropna()]).max() if not data_sub.empty else None
+                if max_val is not None and max_val <= 1.01:
+                    data_sub['local_poss'] = data_sub['local_poss'] * 100.0
+                    data_sub['visit_poss'] = data_sub['visit_poss'] * 100.0
+
+                # campos para mostrar en tooltip ya formateados
+                data_sub['local_poss_pct'] = data_sub['local_poss'].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
+                data_sub['visit_poss_pct'] = data_sub['visit_poss'].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
+
+                x_field, y_field = 'local_poss', 'visit_poss'
+                x_title, y_title = 'Posesión Local (%)', 'Posesión Visitante (%)'
+                # for possession, fix axis to 0-100 for clarity
+                x_scale = alt.Scale(domain=[0, 100])
+                y_scale = alt.Scale(domain=[0, 100])
+
+            plot_df = data_sub.dropna(subset=[x_field, y_field])
+            if plot_df.empty:
+                st.info("No hay filas válidas con valores numéricos para graficar.")
+            else:
+                # preparar tooltip y tamaño de puntos según métrica
+                if metric == "Posesión":
+                    tooltip = ['date:T','equipo_local_norm:N','equipo_visitante_norm:N','local_poss_pct:N','visit_poss_pct:N','resultado_texto:N']
+                    point_size = 60
+                    x_axis = alt.Axis(format='.0f')
+                    y_axis = alt.Axis(format='.0f')
+                else:
+                    tooltip = ['date:T','equipo_local_norm:N','equipo_visitante_norm:N',f'{x_field}:Q', f'{y_field}:Q', 'resultado_texto:N']
+                    point_size = 80
+                    # Para eficiencia aseguramos ejes visibles con formato y ticks
+                    x_axis = alt.Axis(format='.2f', tickCount=5, grid=True)
+                    y_axis = alt.Axis(format='.2f', tickCount=5, grid=True)
+
+                scatter = (alt.Chart(plot_df).mark_point(opacity=0.7, size=point_size)
+                           .encode(
+                               x=alt.X(f'{x_field}:Q', title=x_title, scale=x_scale, axis=x_axis),
+                               y=alt.Y(f'{y_field}:Q', title=y_title, scale=y_scale, axis=y_axis),
+                               color=alt.Color('resultado_texto:N', title='Resultado'),
+                               tooltip=tooltip
+                           ))
+
+                trend = (alt.Chart(plot_df)
+                         .transform_regression(x_field, y_field, method="linear")
+                         .mark_line(color='black')
+                         .encode(x=f'{x_field}:Q', y=f'{y_field}:Q'))
+
+                inner = (scatter + trend).properties(width=260, height=240)
+                unified = inner.facet(
                     column=alt.Column('resultado_texto:N', title='Resultado del Partido'),
-                    title=f'Eficiencia Local vs Visitante (partidos donde {equipo} fue LOCAL)'
+                    title=f"{metric} — {title_side}"
                 )
-            )
-            st.altair_chart(chart_eff_local, use_container_width=True)
 
-        # Cuando el equipo fue VISITANTE
-        data_visit = df[df['equipo_visitante_norm'] == equipo]
-        if data_visit.empty:
-            st.info(f"No hay partidos donde {equipo} haya sido VISITANTE.")
-        else:
-            eff_visit = (alt.Chart(data_visit)
-                .transform_calculate(
-                    local_eff_raw = "datum.local_lastN_remates_puerta > 0 ? datum.local_lastN_goals_for / datum.local_lastN_remates_puerta : null",
-                    visit_eff_raw = "datum.visitante_lastN_remates_puerta > 0 ? datum.visitante_lastN_goals_for / datum.visitante_lastN_remates_puerta : null",
-                    local_eff = "datum.local_eff_raw > 1 ? 1 : datum.local_eff_raw",
-                    visit_eff = "datum.visit_eff_raw > 1 ? 1 : datum.visit_eff_raw"
-                )
-                .transform_filter("isValid(datum.local_eff) && isValid(datum.visit_eff)")
-            )
-
-            chart_eff_visit = (
-                eff_visit.mark_circle(opacity=0.6, size=80)
-                .encode(
-                    x=alt.X('local_eff:Q', title='Eficiencia Local (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
-                    y=alt.Y('visit_eff:Q', title='Eficiencia Visitante (goles / remates a puerta)', scale=alt.Scale(domain=[0,1])),
-                    tooltip=[
-                        alt.Tooltip('equipo_local_norm:N', title='Equipo Local'),
-                        alt.Tooltip('equipo_visitante_norm:N', title='Equipo Visitante'),
-                        alt.Tooltip('local_eff:Q', title='Eficiencia Local', format='.2f'),
-                        alt.Tooltip('visit_eff:Q', title='Eficiencia Visitante', format='.2f'),
-                        alt.Tooltip('resultado_texto:N', title='Resultado')
-                    ]
-                )
-                .properties(width=250, height=250)
-                .facet(
-                    column=alt.Column('resultado_texto:N', title='Resultado del Partido'),
-                    title=f'Eficiencia Local vs Visitante (partidos donde {equipo} fue VISITANTE)'
-                )
-            )
-            st.altair_chart(chart_eff_visit, use_container_width=True)
-
-    # Facet: posesión local vs visitante + tendencia
-    if equipo is None:
-        st.info("Seleccioná un equipo para ver los gráficos de posesión desagregados por local/visitante y resultado.")
-    else:
-        if {'local_lastN_possession_avg','visitante_lastN_possession_avg','resultado_texto'}.issubset(df.columns):
-            # Cuando el equipo fue LOCAL
-            data_local = df[df['equipo_local_norm'] == equipo]
-            scatter_local = (alt.Chart(data_local).mark_point(opacity=0.45)
-                .encode(
-                    x=alt.X('local_lastN_possession_avg:Q', title='Posesión local (prom. N)'),
-                    y=alt.Y('visitante_lastN_possession_avg:Q', title='Posesión visitante (prom. N)'),
-                    tooltip=['equipo_local_norm:N','equipo_visitante_norm:N','resultado_texto:N',
-                             'local_lastN_possession_avg:Q','visitante_lastN_possession_avg:Q']
-                ).properties(width=260, height=220))
-
-            trend_local = (alt.Chart(data_local)
-                .transform_regression('local_lastN_possession_avg', 'visitante_lastN_possession_avg')
-                .mark_line()
-                .encode(x='local_lastN_possession_avg:Q', y='visitante_lastN_possession_avg:Q'))
-
-            facet_local = (scatter_local + trend_local).facet(column=alt.Column('resultado_texto:N', title=''),
-                                                            title=f'Posesión cuando {equipo} fue LOCAL')
-            st.altair_chart(facet_local, use_container_width=True)
-
-            # Cuando el equipo fue VISITANTE
-            data_visit = df[df['equipo_visitante_norm'] == equipo]
-            scatter_visit = (alt.Chart(data_visit).mark_point(opacity=0.45)
-                .encode(
-                    x=alt.X('local_lastN_possession_avg:Q', title='Posesión local (prom. N)'),
-                    y=alt.Y('visitante_lastN_possession_avg:Q', title='Posesión visitante (prom. N)'),
-                    tooltip=['equipo_local_norm:N','equipo_visitante_norm:N','resultado_texto:N',
-                             'local_lastN_possession_avg:Q','visitante_lastN_possession_avg:Q']
-                ).properties(width=260, height=220))
-
-            trend_visit = (alt.Chart(data_visit)
-                .transform_regression('local_lastN_possession_avg', 'visitante_lastN_possession_avg')
-                .mark_line()
-                .encode(x='local_lastN_possession_avg:Q', y='visitante_lastN_possession_avg:Q'))
-
-            facet_visit = (scatter_visit + trend_visit).facet(column=alt.Column('resultado_texto:N', title=''),
-                                                            title=f'Posesión cuando {equipo} fue VISITANTE')
-            st.altair_chart(facet_visit, use_container_width=True)
-        else:
-            st.info("Faltan columnas para el facet (posesiones y resultado_texto).")
+                st.altair_chart(unified, use_container_width=True)
 
 # =========================
 # UTIL: Drive downloader
@@ -482,11 +448,32 @@ def build_one_row(df_full, feat_names, overrides: dict):
 # =========================
 with tab2:
     st.subheader("Modelo seleccionado")
+    # Selector de tipo de modelo/dataset movido aquí (afecta sólo la sección 'Probar modelo')
+    model_choice = st.selectbox('Seleccioná el tipo de modelo/dataset', list(MODEL_CSV_MAP.keys()))
+
+    # Intent: cargar automáticamente el modelo asociado al tipo seleccionado.
+    # Mostramos mensajes de carga aquí en la pestaña.
+    model = None
+    default_fname = MODEL_FILE_MAP.get(model_choice)
+    model_paths_to_try = [os.path.join('models', default_fname), default_fname]
+    model_loaded_path = None
+    model_load_messages = []
+    for p in model_paths_to_try:
+        if p and os.path.exists(p):
+            try:
+                model = joblib.load(p)
+                model_loaded_path = p
+                st.session_state['model'] = model
+                break
+            except Exception as e:
+                model_load_messages.append(f"Encontré '{p}' pero no pude cargarlo: {e}")
+    if model_loaded_path is None:
+        model_load_messages.append(f"No se encontró el archivo de modelo local '{default_fname}'. Colocá el .pkl en la carpeta 'models/' o en la raíz del proyecto con ese nombre para que se cargue automáticamente.")
+
     # Mostrar estado del intento de carga automática realizado al elegir el modelo.
     if model_loaded_path is not None:
         st.success(f"Modelo cargado automáticamente: {model_loaded_path}")
     else:
-        # mostrar cualquier mensaje recolectado (por ejemplo: errores al abrir archivos existentes)
         for m in model_load_messages:
             st.warning(m)
 
