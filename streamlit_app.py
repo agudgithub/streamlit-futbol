@@ -177,6 +177,36 @@ def generar_df_features(df_raw, fecha_referencia=None):
 st.set_page_config(page_title="Análisis y Modelo", layout="wide")
 alt.data_transformers.disable_max_rows()
 
+# Estilos: hacer que los controles ocupen solo su contenido (no todo el ancho)
+st.markdown(
+        """
+        <style>
+        /* Selectbox: inline y ancho ajustado al contenido */
+        div[data-testid="stSelectbox"] { display: inline-block; margin-right: 12px; }
+        div[data-testid="stSelectbox"] > div { width: fit-content; min-width: 220px; }
+
+        /* DateInput: inline y compacto */
+        div[data-testid="stDateInput"] { display: inline-block; margin-right: 12px; }
+        div[data-testid="stDateInput"] > div { width: fit-content; min-width: 220px; }
+        div[data-testid="stDateInput"] input { width: 160px; }
+
+        /* NumberInput: inline y compacto */
+        div[data-testid="stNumberInput"] { display: inline-block; margin-right: 12px; }
+        div[data-testid="stNumberInput"] > div { width: fit-content; min-width: 180px; }
+        div[data-testid="stNumberInput"] input { width: 110px; text-align: center; }
+        /* Responsivo: en pantallas chicas reducir mínimo */
+        @media (max-width: 768px) {
+            div[data-testid="stSelectbox"] > div,
+            div[data-testid="stDateInput"] > div,
+            div[data-testid="stNumberInput"] > div { min-width: 160px; }
+            div[data-testid="stDateInput"] input { width: 140px; }
+            div[data-testid="stNumberInput"] input { width: 100px; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+)
+
 # =========================
 # DATA
 # =========================
@@ -714,18 +744,18 @@ with tab2:
     c1, c2 = st.columns(2)
     # Si tenemos lista de equipos, evitamos que el visitante pueda ser el mismo que el local
     if equipos_all:
-        sel_local = c1.selectbox("equipo_local_norm", equipos_all)
+        sel_local = c1.selectbox("Equipo local", equipos_all)
         visit_options = [e for e in equipos_all if e != sel_local]
         if visit_options:
-            sel_visit = c2.selectbox("equipo_visitante_norm", visit_options)
+            sel_visit = c2.selectbox("Equipo visitante", visit_options)
         else:
             # Caso raro: solo hay un equipo en la lista
-            sel_visit = c2.selectbox("equipo_visitante_norm", ["(No hay otro equipo disponible)"])
+            sel_visit = c2.selectbox("Equipo visitante", ["(No hay otro equipo disponible)"])
             st.warning("No hay otro equipo distinto disponible para seleccionar como visitante.")
     else:
         # fallback a text inputs (validación se hará antes de predecir)
-        sel_local = c1.text_input("equipo_local_norm")
-        sel_visit = c2.text_input("equipo_visitante_norm")
+        sel_local = c1.text_input("Equipo local")
+        sel_visit = c2.text_input("Equipo visitante")
 
     # (Se reubica la fecha de referencia junto al botón de predecir más abajo)
 
