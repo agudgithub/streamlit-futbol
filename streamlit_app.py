@@ -3,7 +3,176 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import numpy as np
-import re, os, joblib, unicodedata
+import re, os, joblib, unicodedata, datetime
+
+# =========================
+# HELPERS de preprocesamiento (antes de load_data)
+# =========================
+def normalizar_texto(s):
+    """Quita acentos, minúsculas, espacios y números."""
+    if pd.isna(s) or s == "":
+        return ""
+    s = str(s).strip()
+    s = unicodedata.normalize('NFKD', s)
+    s = ''.join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r'\d', '', s)  # quita números
+    s = s.lower()
+    s = re.sub(r'\s+', ' ', s)
+    s = s.replace('.', '').replace('-', '')
+    s = s.strip()
+    return s
+
+def to_int_safe(value):
+    try:
+        if value is None:
+            return 0
+        match = re.search(r'\d+', str(value))
+        return int(match.group()) if match else 0
+    except (ValueError, TypeError):
+        return 0
+
+def to_float_safe(value):
+    try:
+        if value is None:
+            return 0.0
+        value_str = str(value).replace('%', '').strip()
+        match = re.search(r'[\d.]+', value_str)
+        return float(match.group()) if match else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+def to_float_first_number(x):
+    if pd.isna(x) or x == "":
+        return 0.0
+    s = str(x).replace('%', '').replace('％', '').replace(',', '.').strip()
+    m = re.search(r'-?\d+(\.\d+)?', s)
+    return float(m.group(0)) if m else 0.0
+
+# ========== Fechas completas y N dinámico ==========
+def unir_fecha_anio(df):
+    df['fecha_str'] = df['fecha'].astype(str).str.zfill(5) + df['anio'].astype(str)
+    df['fecha_completa'] = pd.to_datetime(df['fecha_str'], format='%d/%m/%Y', errors='coerce')
+    return df
+
+def calcular_N_dinamico(df, fecha_usuario, ventana_meses=12):
+    fecha_usuario = pd.to_datetime(fecha_usuario)
+    fecha_max = df['fecha_completa'].max()
+    if fecha_usuario > fecha_max:
+        raise ValueError(f"La fecha elegida ({fecha_usuario.date()}) supera la fecha máxima disponible ({fecha_max.date()})")
+    ventana_atras = fecha_usuario - pd.DateOffset(months=ventana_meses)
+    rango = df[(df['fecha_completa'] <= fecha_usuario) & (df['fecha_completa'] >= ventana_atras)]
+    equipos = pd.concat([rango['equipo_local'], rango['equipo_visitante']]).unique() if not rango.empty else []
+    partidos_por_equipo = [rango[(rango['equipo_local']==eq)|(rango['equipo_visitante']==eq)].shape[0] for eq in equipos]
+    return min(partidos_por_equipo) if partidos_por_equipo else 1
+
+# ========== Generar features dinámicos (para exploración) ==========
+def generar_df_features(df_raw, fecha_referencia=None):
+    df = unir_fecha_anio(df_raw.copy())
+    if fecha_referencia is not None:
+        N = calcular_N_dinamico(df, fecha_referencia, 24)  # 2 años hacia atrás si se provee fecha
+    else:
+        N = 3
+    df['equipo_local_norm'] = df['equipo_local'].apply(normalizar_texto)
+    df['equipo_visitante_norm'] = df['equipo_visitante'].apply(normalizar_texto)
+    df['goles_local_num'] = df['resultado_local'].apply(to_int_safe)
+    df['goles_visitante_num'] = df['resultado_visitante'].apply(to_int_safe)
+    num_feats = [
+        ('remates_total_local', 'remates_total_local_num'),
+        ('remates_total_visitante', 'remates_total_visitante_num'),
+        ('remates_puerta_local', 'remates_puerta_local_num'),
+        ('remates_puerta_visitante', 'remates_puerta_visitante_num')
+    ]
+    for col, col_num in num_feats:
+        if col in df.columns:
+            df[col_num] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+        else:
+            df[col_num] = 0
+    df['posesion_local_num'] = df['posesion_local'].apply(to_float_first_number) if 'posesion_local' in df.columns else 0.0
+    df['posesion_visitante_num'] = df['posesion_visitante'].apply(to_float_first_number) if 'posesion_visitante' in df.columns else 0.0
+
+    def _calc_metrics(prev_df, equipo_norm):
+        resumen = { 'matches': 0, 'wins': 0, 'winrate': 0.0, 'goals_for': 0, 'goals_against': 0,
+                    'remates_total': 0, 'remates_puerta': 0, 'possession_avg': 0.0 }
+        if prev_df is None or prev_df.shape[0] == 0:
+            return resumen
+        resumen['matches'] = prev_df.shape[0]
+        gf = ga = rt = rp = 0
+        poss = []
+        wins = 0
+        for _, r in prev_df.iterrows():
+            if normalizar_texto(r['equipo_local']) == equipo_norm:
+                goals_for = to_int_safe(r.get('goles_local_num'))
+                goals_against = to_int_safe(r.get('goles_visitante_num'))
+                rem_total = to_int_safe(r.get('remates_total_local_num'))
+                rem_puerta = to_int_safe(r.get('remates_puerta_local_num'))
+                possession = to_float_safe(r.get('posesion_local_num'))
+            else:
+                goals_for = to_int_safe(r.get('goles_visitante_num'))
+                goals_against = to_int_safe(r.get('goles_local_num'))
+                rem_total = to_int_safe(r.get('remates_total_visitante_num'))
+                rem_puerta = to_int_safe(r.get('remates_puerta_visitante_num'))
+                possession = to_float_safe(r.get('posesion_visitante_num'))
+            gf += goals_for; ga += goals_against; rt += rem_total; rp += rem_puerta; poss.append(possession)
+            if goals_for > goals_against: wins += 1
+        resumen['wins'] = wins
+        resumen['winrate'] = (wins / resumen['matches']) if resumen['matches'] > 0 else 0.0
+        resumen['goals_for'] = gf; resumen['goals_against'] = ga
+        resumen['remates_total'] = rt; resumen['remates_puerta'] = rp
+        resumen['possession_avg'] = (sum(poss)/len(poss)) if len(poss) > 0 else 0.0
+        return resumen
+
+    out_cols = [
+        'fecha_completa', 'equipo_local_norm', 'equipo_visitante_norm', 'goles_local_num', 'goles_visitante_num'
+    ]
+    cols_features = [
+        'local_lastN_matches', 'local_lastN_wins', 'local_lastN_winrate',
+        'local_lastN_goals_for', 'local_lastN_remates_puerta', 'local_lastN_possession_avg',
+        'visitante_lastN_matches', 'visitante_lastN_wins',
+        'visitante_lastN_winrate', 'visitante_lastN_goals_for', 'visitante_lastN_remates_puerta',
+        'visitante_lastN_possession_avg',
+        'total_goles_partido', 'diferencia_goles_partido', 'resultado_texto'
+    ]
+    df_out = pd.DataFrame(columns=out_cols + cols_features)
+    for idx, row in df.iterrows():
+        team_local = row['equipo_local_norm']
+        team_visit = row['equipo_visitante_norm']
+        prev_local = df.loc[((df['equipo_local_norm'] == team_local) | (df['equipo_visitante_norm'] == team_local)) & (df.index > idx)].head(N)
+        prev_visit = df.loc[((df['equipo_visitante_norm'] == team_visit) | (df['equipo_local_norm'] == team_visit)) & (df.index > idx)].head(N)
+        metrics_local = _calc_metrics(prev_local, team_local)
+        metrics_visit = _calc_metrics(prev_visit, team_visit)
+        if int(row.get('goles_local_num', 0)) > int(row.get('goles_visitante_num', 0)):
+            resultado_texto = 'gana_local'
+        elif int(row.get('goles_local_num', 0)) < int(row.get('goles_visitante_num', 0)):
+            resultado_texto = 'gana_visitante'
+        else:
+            resultado_texto = 'empate'
+        fila = {
+            'fecha_completa': row.get('fecha_completa'),
+            'equipo_local_norm': team_local,
+            'equipo_visitante_norm': team_visit,
+            'goles_local_num': int(row.get('goles_local_num', 0)),
+            'goles_visitante_num': int(row.get('goles_visitante_num', 0)),
+            'local_lastN_matches': metrics_local['matches'],
+            'local_lastN_wins': metrics_local['wins'],
+            'local_lastN_winrate': round(metrics_local['winrate'], 3),
+            'local_lastN_goals_for': metrics_local['goals_for'],
+            'local_lastN_remates_puerta': metrics_local['remates_puerta'],
+            'local_lastN_possession_avg': round(metrics_local['possession_avg'], 3),
+            'visitante_lastN_matches': metrics_visit['matches'],
+            'visitante_lastN_wins': metrics_visit['wins'],
+            'visitante_lastN_winrate': round(metrics_visit['winrate'], 3),
+            'visitante_lastN_goals_for': metrics_visit['goals_for'],
+            'visitante_lastN_remates_puerta': metrics_visit['remates_puerta'],
+            'visitante_lastN_possession_avg': round(metrics_visit['possession_avg'], 3),
+            'total_goles_partido': int(row.get('goles_local_num', 0)) + int(row.get('goles_visitante_num', 0)),
+            'diferencia_goles_partido': int(row.get('goles_local_num', 0)) - int(row.get('goles_visitante_num', 0)),
+            'resultado_texto': resultado_texto
+        }
+        df_out = pd.concat([df_out, pd.DataFrame([fila])], ignore_index=True)
+    df_out = df_out.apply(pd.to_numeric, errors='ignore')
+    df_out['fecha_completa'] = pd.to_datetime(df_out['fecha_completa'])
+    df_out.dropna(inplace=True)
+    return df_out
 
 st.set_page_config(page_title="Análisis y Modelo", layout="wide")
 alt.data_transformers.disable_max_rows()
@@ -13,17 +182,17 @@ alt.data_transformers.disable_max_rows()
 # =========================
 @st.cache_data
 def load_data(path):
-    df = pd.read_csv(path, dayfirst=True)
-    # normalizaciones básicas
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
-    # features derivados
-    if {'local_lastN_winrate','visitante_lastN_winrate'}.issubset(df.columns):
-        df['delta_winrate'] = df['local_lastN_winrate'] - df['visitante_lastN_winrate']
-    if {'local_lastN_possession_avg','visitante_lastN_possession_avg'}.issubset(df.columns):
-        df['delta_possession'] = df['local_lastN_possession_avg'] - df['visitante_lastN_possession_avg']
-    # (no normalization needed — CSV tiene nombres finales)
-    return df
+    # Cargar datos crudos y generar features para exploración
+    df_raw = pd.read_csv(path, dayfirst=True)
+    df_feat = generar_df_features(df_raw, fecha_referencia=None)
+    # compatibilidad: charts usan 'date'
+    df_feat['date'] = df_feat['fecha_completa']
+    # features derivados para gráficos
+    if {'local_lastN_winrate','visitante_lastN_winrate'}.issubset(df_feat.columns):
+        df_feat['delta_winrate'] = df_feat['local_lastN_winrate'] - df_feat['visitante_lastN_winrate']
+    if {'local_lastN_possession_avg','visitante_lastN_possession_avg'}.issubset(df_feat.columns):
+        df_feat['delta_possession'] = df_feat['local_lastN_possession_avg'] - df_feat['visitante_lastN_possession_avg']
+    return df_feat
 
 
 # Nota: ya no se necesita normalizar nombres de equipos — el CSV viene correcto
@@ -36,25 +205,36 @@ st.caption("Altair + Streamlit • Exploración y prueba de modelo")
 
 # Selección global de modelo/dataset (afecta los CSVs que se cargan)
 MODEL_CSV_MAP = {
-    'Gradiente': 'df_grid_procesado_gradiente.csv',
-    'Regresion': 'df_grid_procesado_regresion.csv',
-    'Ridge': 'df_grid_procesado_ridge.csv'
+    'Random Forest': 'datos_procesados_modelo.csv',
+    'Regresion': 'datos_procesados_modelo.csv',
+    'Ridge': 'datos_procesados_modelo.csv'
 }
 MODEL_FILE_MAP = {
-    'Gradiente': 'modelo_final_gradiente.pkl',
+    'Random Forest': 'modelo_final_random.pkl',
     'Regresion': 'modelo_final_regresion.pkl',
     'Ridge': 'modelo_final_ridge.pkl'
 }
 
 # Cargar dataset por defecto (para la exploración). El selector de modelo/dataset
 # fue movido a la pestaña 'Probar modelo' para no interferir la exploración.
-DEFAULT_MODEL_CHOICE = 'Gradiente'
+DEFAULT_MODEL_CHOICE = 'Random Forest'
 DATA_PATH = os.path.join('data', MODEL_CSV_MAP[DEFAULT_MODEL_CHOICE])
 df = load_data(DATA_PATH)
+
+# conservar una copia cruda para cálculos dinámicos en predicción
+if 'df_source' not in st.session_state:
+    try:
+        st.session_state['df_source'] = pd.read_csv(DATA_PATH, dayfirst=True)
+    except Exception:
+        st.session_state['df_source'] = None
 
 # asegurar existencia de session_state para el modelo
 if 'model' not in st.session_state:
     st.session_state['model'] = None
+
+# valor por defecto para cantidad de partidos a mostrar en las gráficas
+if 'matches_limit' not in st.session_state:
+    st.session_state['matches_limit'] = 30
 
 tab1, tab2, tab3 = st.tabs(["Exploración", "Probar modelo", "Acerca de"])
 
@@ -213,7 +393,7 @@ def _drive_id_from_url(url: str):
     return m.group(1) if m else None
 
 @st.cache_resource(show_spinner=False)
-def load_model_from_drive(url_or_id: str, out_path='modelo_final_gradiente.pkl'):
+def load_model_from_drive(url_or_id: str, out_path='modelo_final_random.pkl'):
     import gdown
     file_id = url_or_id if re.fullmatch(r'[A-Za-z0-9_-]{25,}', url_or_id) else _drive_id_from_url(url_or_id)
     if not file_id:
@@ -221,50 +401,126 @@ def load_model_from_drive(url_or_id: str, out_path='modelo_final_gradiente.pkl')
     gdown.download(id=file_id, output=out_path, quiet=True)
     return joblib.load(out_path)
 
-# =========================
-# HELPERS: armar fila 1xN con todas las features
-# =========================
-# ======= Preprocessing helpers (same logic used in training preprocessing) =======
-def normalizar_texto(s):
-    """Quita acentos, minúsculas, espacios y números."""
-    if pd.isna(s) or s == "":
-        return ""
-    s = str(s).strip()
-    s = unicodedata.normalize('NFKD', s)
-    s = ''.join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r'\d', '', s)  # quita números
-    s = s.lower()
-    s = re.sub(r'\s+', ' ', s)
-    s = s.replace('.', '').replace('-', '')
-    s = s.strip()
-    return s
+## (helpers y funciones de features ya están definidas arriba)
 
-def to_int_safe(value):
+# Util: obtener el estimador final (desenvolver Pipeline/GridSearchCV, etc.)
+def get_final_estimator(model):
+    est = model
+    # Desenrollar meta-estimadores comunes
+    for attr in ("best_estimator_", "estimator_"):
+        if hasattr(est, attr):
+            try:
+                est = getattr(est, attr)
+            except Exception:
+                pass
+    # Desenrollar Pipeline (sklearn o imblearn)
     try:
-        if value is None:
-            return 0
-        match = re.search(r'\d+', str(value))
-        return int(match.group()) if match else 0
-    except (ValueError, TypeError):
-        return 0
+        if hasattr(est, 'steps') and est.steps:
+            est = est.steps[-1][1]
+        elif hasattr(est, 'named_steps') and est.named_steps:
+            est = list(est.named_steps.values())[-1]
+    except Exception:
+        pass
+    # Desenrollar base_estimator si existe
+    if hasattr(est, 'base_estimator_'):
+        try:
+            est = getattr(est, 'base_estimator_')
+        except Exception:
+            pass
+    return est
 
-def to_float_safe(value):
+# Util: intentar obtener los nombres de features transformados (p. ej. ColumnTransformer/OneHotEncoder)
+def get_transformed_feature_names(model, input_feature_names=None):
+    # 1) Si el modelo expone get_feature_names_out, intentarlo directamente
     try:
-        if value is None:
-            return 0.0
-        value_str = str(value).replace('%', '').strip()
-        match = re.search(r'[\d.]+', value_str)
-        return float(match.group()) if match else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+        if hasattr(model, 'get_feature_names_out'):
+            try:
+                return list(model.get_feature_names_out())
+            except TypeError:
+                # Algunos requieren input_feature_names
+                if input_feature_names is not None:
+                    try:
+                        return list(model.get_feature_names_out(input_feature_names))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
-def to_float_first_number(x):
-    if pd.isna(x) or x == "":
-        return 0.0
-    s = str(x).replace('%', '').replace('％', '').replace(',', '.').strip()
-    m = re.search(r'-?\d+(\.\d+)?', s)
-    return float(m.group(0)) if m else 0.0
+    # 2) Si es un Pipeline, buscar el último transformador que exponga get_feature_names_out
+    steps = []
+    try:
+        if hasattr(model, 'steps') and model.steps:
+            steps = [s[1] for s in model.steps]
+        elif hasattr(model, 'named_steps') and model.named_steps:
+            steps = list(model.named_steps.values())
+    except Exception:
+        steps = []
 
+    for step in reversed(steps):
+        if hasattr(step, 'get_feature_names_out'):
+            try:
+                return list(step.get_feature_names_out())
+            except TypeError:
+                if input_feature_names is not None:
+                    try:
+                        return list(step.get_feature_names_out(input_feature_names))
+                    except Exception:
+                        pass
+        # Si el step es a su vez un Pipeline anidado, intentar recursivamente
+        try:
+            nested = get_transformed_feature_names(step, input_feature_names)
+            if nested:
+                return list(nested)
+        except Exception:
+            pass
+
+    # 3) Buscar atributos comunes para preprocesadores
+    for attr in ('preprocessor', 'transformer', 'columntransformer'):
+        tr = getattr(model, attr, None)
+        if tr is not None and hasattr(tr, 'get_feature_names_out'):
+            try:
+                return list(tr.get_feature_names_out())
+            except Exception:
+                pass
+
+    return None
+
+# Util: detectar nombres genéricos tipo x0, f1, etc.
+def _is_generic_names(names):
+    try:
+        return all(re.match(r'^[xf]\d+$', str(n)) for n in names)
+    except Exception:
+        return False
+
+# Util: agregar importancias por feature original cuando el modelo expande columnas (OneHot/transformers)
+def aggregate_importance_to_original(weights, names, original_feats):
+    # Retorna lista de pesos alineados a original_feats sumando contribuciones de columnas transformadas
+    try:
+        orig_list = list(original_feats)
+        orig_low = [(f, f.lower()) for f in orig_list]
+        # ordenar por largo desc para preferir match de nombres largos
+        orig_low.sort(key=lambda x: -len(x[1]))
+        agg = {f: 0.0 for f in orig_list}
+        for w, n in zip(weights, names):
+            s = str(n).lower()
+            matched = None
+            # match directo por substring
+            for f, f_low in orig_low:
+                if f_low and f_low in s:
+                    matched = f
+                    break
+            # intento adicional por tokens separados por '__' o '_'
+            if matched is None:
+                tokens = re.split(r'__|_', s)
+                for f, f_low in orig_low:
+                    if f_low in tokens or any(tok == f_low for tok in tokens):
+                        matched = f
+                        break
+            if matched is not None:
+                agg[matched] += float(w)
+        return [agg[f] for f in orig_list]
+    except Exception:
+        return None
 
 def calc_metrics(prev_df, equipo_norm):
     resumen = { 'matches': 0, 'wins': 0, 'winrate': 0.0, 'goals_for': 0, 'goals_against': 0,
@@ -308,41 +564,26 @@ def calc_metrics(prev_df, equipo_norm):
     resumen['possession_avg'] = (sum(poss)/len(poss)) if len(poss) > 0 else 0.0
     return resumen
 
-
-def build_match_features(df_raw, equipo_local, equipo_visitante, N=6):
-    """Genera las features agregadas para la pareja (local, visitante) usando las N últimas apariciones de cada equipo.
-    Devuelve un dict con claves tipo 'local_lastN_winrate', 'visitante_lastN_winrate', etc., compatibles con el pipeline.
-    Si no puede computar (faltan columnas), devuelve {} para indicar fallback.
-    """
+# ========= Features para predicción por ventana temporal (6 meses) =========
+def build_match_features_by_date_window(df_raw, equipo_local, equipo_visitante, fecha_referencia, months_window=6):
     if equipo_local is None or equipo_visitante is None:
         return {}
-    local_norm = normalizar_texto(equipo_local)
-    visit_norm = normalizar_texto(equipo_visitante)
-
-    df2 = df_raw.copy()
-    # ensure normalized team name columns
+    df2 = unir_fecha_anio(df_raw.copy())
+    # asegurar columnas necesarias
     if 'equipo_local_norm' not in df2.columns and 'equipo_local' in df2.columns:
         df2['equipo_local_norm'] = df2['equipo_local'].apply(normalizar_texto)
         df2['equipo_visitante_norm'] = df2['equipo_visitante'].apply(normalizar_texto)
-
-    # ensure numeric goal columns
     if 'goles_local_num' not in df2.columns and 'resultado_local' in df2.columns:
         df2['goles_local_num'] = df2['resultado_local'].apply(to_int_safe)
         df2['goles_visitante_num'] = df2['resultado_visitante'].apply(to_int_safe)
-
-    # remates and possession
-    num_feats = [
-        ('remates_total_local', 'remates_total_local_num'),
-        ('remates_total_visitante', 'remates_total_visitante_num'),
-        ('remates_puerta_local', 'remates_puerta_local_num'),
-        ('remates_puerta_visitante', 'remates_puerta_visitante_num')
-    ]
-    for col, col_num in num_feats:
+    for col, col_num in [('remates_total_local', 'remates_total_local_num'),
+                         ('remates_total_visitante', 'remates_total_visitante_num'),
+                         ('remates_puerta_local', 'remates_puerta_local_num'),
+                         ('remates_puerta_visitante', 'remates_puerta_visitante_num')]:
         if col in df2.columns:
             df2[col_num] = pd.to_numeric(df2[col], errors='coerce').fillna(0).astype(int)
         elif col_num not in df2.columns:
             df2[col_num] = 0
-
     if 'posesion_local_num' not in df2.columns:
         if 'posesion_local' in df2.columns:
             df2['posesion_local_num'] = df2['posesion_local'].apply(to_float_first_number)
@@ -351,52 +592,35 @@ def build_match_features(df_raw, equipo_local, equipo_visitante, N=6):
             df2['posesion_local_num'] = 0.0
             df2['posesion_visitante_num'] = 0.0
 
-    # ensure date for ordering
-    if 'date' not in df2.columns:
-        if 'fecha' in df2.columns:
-            try:
-                df2['date'] = pd.to_datetime(df2['fecha'], dayfirst=True, errors='coerce')
-            except Exception:
-                df2['date'] = pd.NaT
-        else:
-            df2['date'] = pd.NaT
+    local_norm = normalizar_texto(equipo_local)
+    visit_norm = normalizar_texto(equipo_visitante)
+    fecha_ref = pd.to_datetime(fecha_referencia)
+    fecha_ini = fecha_ref - pd.DateOffset(months=months_window)
+    rango = df2[(df2['fecha_completa'] <= fecha_ref) & (df2['fecha_completa'] >= fecha_ini)]
 
-    # find last N matches for each team (sorted by date descending)
-    def last_n(team_norm):
-        mask = (df2.get('equipo_local_norm') == team_norm) | (df2.get('equipo_visitante_norm') == team_norm)
-        sub = df2.loc[mask].copy()
-        if 'date' in sub.columns and sub['date'].notna().any():
-            sub = sub.sort_values('date', ascending=False)
-        else:
-            sub = sub.sort_index(ascending=False)
-        return sub.head(N)
+    prev_local = rango[(rango['equipo_local_norm'] == local_norm) | (rango['equipo_visitante_norm'] == local_norm)]
+    prev_visit = rango[(rango['equipo_local_norm'] == visit_norm) | (rango['equipo_visitante_norm'] == visit_norm)]
 
-    prev_local = last_n(local_norm)
-    prev_visit = last_n(visit_norm)
-
-    # compute metrics
     metrics_local = calc_metrics(prev_local, local_norm)
     metrics_visit = calc_metrics(prev_visit, visit_norm)
 
-    features = {
+    return {
         'local_lastN_matches': metrics_local['matches'],
         'local_lastN_wins': metrics_local['wins'],
         'local_lastN_winrate': round(metrics_local['winrate'], 3),
         'local_lastN_goals_for': metrics_local['goals_for'],
-        'local_lastN_goals_against': metrics_local['goals_against'],
-        'local_lastN_remates_total': metrics_local['remates_total'],
         'local_lastN_remates_puerta': metrics_local['remates_puerta'],
         'local_lastN_possession_avg': round(metrics_local['possession_avg'], 3),
         'visitante_lastN_matches': metrics_visit['matches'],
         'visitante_lastN_wins': metrics_visit['wins'],
         'visitante_lastN_winrate': round(metrics_visit['winrate'], 3),
         'visitante_lastN_goals_for': metrics_visit['goals_for'],
-        'visitante_lastN_goals_against': metrics_visit['goals_against'],
-        'visitante_lastN_remates_total': metrics_visit['remates_total'],
         'visitante_lastN_remates_puerta': metrics_visit['remates_puerta'],
         'visitante_lastN_possession_avg': round(metrics_visit['possession_avg'], 3)
     }
-    return features
+
+
+## (calc_metrics y build_match_features ya están definidos anteriormente; se elimina duplicado)
 def infer_feature_names(model, fallback_cols):
     if hasattr(model, "feature_names_in_"):
         return list(model.feature_names_in_)
@@ -503,14 +727,9 @@ with tab2:
         sel_local = c1.text_input("equipo_local_norm")
         sel_visit = c2.text_input("equipo_visitante_norm")
 
-    # --- Controles numéricos básicos ---
-    cols_simple = [
-        'local_lastN_winrate','visitante_lastN_winrate',
-        'local_lastN_goals_for','visitante_lastN_goals_for',
-        'local_lastN_possession_avg','visitante_lastN_possession_avg',
-        'local_lastN_remates_puerta','visitante_lastN_remates_puerta'
-    ]
-    med = df.median(numeric_only=True).to_dict()
+    # (Se reubica la fecha de referencia junto al botón de predecir más abajo)
+
+    # Valores base del usuario (equipos seleccionados)
     user_vals = {'equipo_local_norm': sel_local, 'equipo_visitante_norm': sel_visit}
 
     # Validación en caliente: mostrar aviso si los equipos son iguales (o placeholder)
@@ -523,33 +742,230 @@ with tab2:
             teams_different = False
             st.error("No es posible seleccionar el mismo equipo como visitante. Añadí más equipos al dataset o usa otro CSV.")
 
-    # Opciones avanzadas: por defecto están ocultas. Solo se usan si el usuario marca 'usar_advanced'.
-    advanced_defaults = {
-        'local_lastN_winrate': 0.42,
-        'local_lastN_goals_for': 0.31,
-        'local_lastN_possession_avg': 0.82,
-        'local_lastN_remates_puerta': 0.35,
-        'visitante_lastN_winrate': 0.40,
-        'visitante_lastN_goals_for': 0.36,
-        'visitante_lastN_possession_avg': 0.83,
-        'visitante_lastN_remates_puerta': 0.40
+    # Se removieron las opciones avanzadas para simplificar la interfaz
+
+    # =========================
+    # ESTADÍSTICAS PARAMETRIZABLES DE LOS EQUIPOS SELECCIONADOS
+    # =========================
+    st.markdown("### Estadísticas de los equipos seleccionados")
+    st.caption("Se usan las columnas de features ya preprocesadas (df) para generar las métricas.")
+
+    def _team_metric_df(df_src: pd.DataFrame, team_norm: str, metric_key: str, side_filter: str, year_filter: str, max_rows=None):
+        """Devuelve un DataFrame con una columna 'metric_value' para el equipo dado,
+        tomando la columna correcta según juegue de local o visitante. Permite filtrar por lado.
+        metric_key puede ser: winrate, possession, efficiency, goals_for, shots_on_target, matches.
+        """
+        if not team_norm:
+            return pd.DataFrame()
+
+        # Seleccionar filas donde participa el equipo
+        mask_local = df_src['equipo_local_norm'] == team_norm
+        mask_visit = df_src['equipo_visitante_norm'] == team_norm
+
+        if side_filter == "Solo local":
+            df_team = df_src[mask_local].copy()
+        elif side_filter == "Solo visitante":
+            df_team = df_src[mask_visit].copy()
+        else:
+            df_team = df_src[mask_local | mask_visit].copy()
+
+        if df_team.empty:
+            return pd.DataFrame()
+
+    # Indicar lado
+        df_team['home_away'] = np.where(df_team['equipo_local_norm'] == team_norm, 'Local', 'Visitante')
+
+        # Seleccionar columna de métrica según lado
+        if metric_key == 'winrate':
+            df_team['metric_value'] = np.where(
+                df_team['home_away'] == 'Local',
+                pd.to_numeric(df_team.get('local_lastN_winrate'), errors='coerce'),
+                pd.to_numeric(df_team.get('visitante_lastN_winrate'), errors='coerce')
+            )
+            y_title = 'Winrate (0-1)'
+            scale = alt.Scale(domain=[0, 1])
+            fmt = '.2f'
+        elif metric_key == 'possession':
+            df_team['metric_value'] = np.where(
+                df_team['home_away'] == 'Local',
+                pd.to_numeric(df_team.get('local_lastN_possession_avg'), errors='coerce'),
+                pd.to_numeric(df_team.get('visitante_lastN_possession_avg'), errors='coerce')
+            )
+            # Si parece estar en 0-1, convertir a porcentaje
+            max_val = df_team['metric_value'].max()
+            if pd.notna(max_val) and max_val <= 1.01:
+                df_team['metric_value'] = df_team['metric_value'] * 100.0
+            y_title = 'Posesión (%)'
+            scale = alt.Scale(domain=[0, 100])
+            fmt = '.0f'
+        elif metric_key == 'efficiency':
+            # goles a favor / remates a puerta, acotado a 1
+            local_eff = (pd.to_numeric(df_team.get('local_lastN_goals_for'), errors='coerce') /
+                         pd.to_numeric(df_team.get('local_lastN_remates_puerta'), errors='coerce').replace(0, np.nan))
+            visit_eff = (pd.to_numeric(df_team.get('visitante_lastN_goals_for'), errors='coerce') /
+                         pd.to_numeric(df_team.get('visitante_lastN_remates_puerta'), errors='coerce').replace(0, np.nan))
+            df_team['metric_value'] = np.where(df_team['home_away'] == 'Local', local_eff, visit_eff)
+            df_team['metric_value'] = df_team['metric_value'].clip(upper=1)
+            y_title = 'Eficiencia (goles/remates a puerta)'
+            scale = alt.Scale(domain=[0, 1])
+            fmt = '.2f'
+        elif metric_key == 'goals_for':
+            df_team['metric_value'] = np.where(
+                df_team['home_away'] == 'Local',
+                pd.to_numeric(df_team.get('local_lastN_goals_for'), errors='coerce'),
+                pd.to_numeric(df_team.get('visitante_lastN_goals_for'), errors='coerce')
+            )
+            y_title = 'Goles a favor'
+            scale = alt.Scale(zero=True)
+            fmt = '.0f'
+        elif metric_key == 'shots_on_target':
+            df_team['metric_value'] = np.where(
+                df_team['home_away'] == 'Local',
+                pd.to_numeric(df_team.get('local_lastN_remates_puerta'), errors='coerce'),
+                pd.to_numeric(df_team.get('visitante_lastN_remates_puerta'), errors='coerce')
+            )
+            y_title = 'Remates a puerta'
+            scale = alt.Scale(zero=True)
+            fmt = '.0f'
+        else:
+            # métrica no soportada
+            return pd.DataFrame(), '', None, '.0f'
+
+        # Orden temporal y columnas útiles
+        df_team = df_team.dropna(subset=['metric_value'])
+        if 'date' not in df_team.columns and 'fecha_completa' in df_team.columns:
+            df_team['date'] = pd.to_datetime(df_team['fecha_completa'])
+        # Filtro por año si corresponde
+        if year_filter and isinstance(year_filter, str) and year_filter != "Todos":
+            try:
+                yr = int(year_filter)
+                df_team = df_team[pd.to_datetime(df_team['date']).dt.year == yr]
+            except Exception:
+                pass
+        df_team = df_team.sort_values('date')
+        # limitar cantidad de partidos mostrados (los más recientes)
+        try:
+            if max_rows is not None and int(max_rows) > 0:
+                df_team = df_team.tail(int(max_rows))
+        except Exception:
+            pass
+        df_team['oponente'] = np.where(df_team['home_away'] == 'Local', df_team['equipo_visitante_norm'], df_team['equipo_local_norm'])
+        return df_team, y_title, scale, fmt
+
+    # Controles de parametrización
+    # Construir lista de años disponibles desde el df preprocesado
+    if 'date' in df.columns:
+        try:
+            years = sorted(pd.to_datetime(df['date']).dropna().dt.year.unique().tolist())
+        except Exception:
+            years = []
+    elif 'fecha_completa' in df.columns:
+        try:
+            years = sorted(pd.to_datetime(df['fecha_completa']).dropna().dt.year.unique().tolist())
+        except Exception:
+            years = []
+    else:
+        years = []
+
+    m1, m2, m3, m4, m5 = st.columns([1.2, 1.1, 1.0, 1.0, 1.2])
+    metric_label = m1.selectbox(
+        "Métrica",
+        [
+            "Winrate",
+            "Posesión",
+            "Eficiencia",
+            "Goles a favor",
+            "Remates a puerta"
+        ],
+        index=0
+    )
+    side_choice = m2.selectbox("Lado", ["Ambos", "Solo local", "Solo visitante"], index=0)
+    year_options = ["Todos"] + [str(y) for y in years]
+    year_choice = m3.selectbox("Año", year_options, index=0)
+    chart_type = m4.selectbox("Tipo", ["Línea", "Puntos"], index=0)
+
+    # Nuevo: cantidad de partidos a mostrar (misma fila que los demás parámetros)
+    matches_limit_input = m5.number_input(
+        "Partidos a mostrar",
+        min_value=5,
+        max_value=200,
+        value=int(st.session_state.get('matches_limit', 30)),
+        step=5,
+        help="Limita cuántos partidos recientes se grafican en las tarjetas superiores"
+    )
+    st.session_state['matches_limit'] = int(matches_limit_input)
+
+    metric_map = {
+        "Winrate": "winrate",
+        "Posesión": "possession",
+        "Eficiencia": "efficiency",
+        "Goles a favor": "goals_for",
+        "Remates a puerta": "shots_on_target"
     }
+    metric_key = metric_map[metric_label]
 
-    advanced_values = {}
-    with st.expander("Opciones avanzadas", expanded=False):
-        use_advanced = st.checkbox("Usar opciones avanzadas para la predicción", value=False)
-        colA, colB = st.columns(2)
-        for i, c in enumerate(cols_simple):
-            w = colA if i % 2 == 0 else colB
-            default = float(advanced_defaults.get(c, med.get(c, 0.0)))
-            # mostrar el control pero no aplicarlo hasta que use_advanced sea True
-            advanced_values[c] = w.number_input(c, value=default)
+    c_left, c_right = st.columns(2)
+    matches_limit = int(matches_limit_input)
+    if isinstance(sel_local, str) and sel_local and isinstance(sel_visit, str) and sel_visit and teams_different:
+        # Panel izquierdo: equipo local seleccionado
+        ldf, y_title_l, scale_l, fmt_l = _team_metric_df(df, sel_local, metric_key, side_choice, year_choice, matches_limit)
+        if not ldf.empty:
+            if chart_type == 'Línea':
+                base_l = alt.Chart(ldf).mark_line()
+            else:
+                base_l = alt.Chart(ldf).mark_point(size=60, opacity=0.8)
+            chart_l = (base_l
+                       .encode(
+                           x=alt.X('date:T', title='Fecha'),
+                           y=alt.Y('metric_value:Q', title=y_title_l, scale=scale_l, axis=alt.Axis(format=fmt_l)),
+                           color=alt.Color('home_away:N', title='Condición'),
+                           tooltip=['date:T', 'home_away:N', 'oponente:N', alt.Tooltip('metric_value:Q', title=metric_label, format=fmt_l)]
+                       )
+                       .properties(title=f"{metric_label} — {sel_local}", height=260))
+            c_left.altair_chart(chart_l, use_container_width=True)
+        else:
+            c_left.info("Sin datos preprocesados para el equipo local seleccionado con el filtro actual.")
 
-    # si el usuario eligió usar opciones avanzadas, incorporarlas a user_vals
-    if 'use_advanced' in locals() and use_advanced:
-        user_vals.update(advanced_values)
+        # Panel derecho: equipo visitante seleccionado
+        rdf, y_title_r, scale_r, fmt_r = _team_metric_df(df, sel_visit, metric_key, side_choice, year_choice, matches_limit)
+        if not rdf.empty:
+            if chart_type == 'Línea':
+                base_r = alt.Chart(rdf).mark_line()
+            else:
+                base_r = alt.Chart(rdf).mark_point(size=60, opacity=0.8)
+            chart_r = (base_r
+                       .encode(
+                           x=alt.X('date:T', title='Fecha'),
+                           y=alt.Y('metric_value:Q', title=y_title_r, scale=scale_r, axis=alt.Axis(format=fmt_r)),
+                           color=alt.Color('home_away:N', title='Condición'),
+                           tooltip=['date:T', 'home_away:N', 'oponente:N', alt.Tooltip('metric_value:Q', title=metric_label, format=fmt_r)]
+                       )
+                       .properties(title=f"{metric_label} — {sel_visit}", height=260))
+            c_right.altair_chart(chart_r, use_container_width=True)
+        else:
+            c_right.info("Sin datos preprocesados para el equipo visitante seleccionado con el filtro actual.")
+    else:
+        st.info("Seleccioná dos equipos distintos para ver sus estadísticas.")
 
-    if st.button("Predecir"):
+    # --- Fecha de referencia + cantidad de partidos (misma fila), botón debajo ---
+    pred_row_l, pred_row_r = st.columns([1.0, 0.6])
+    with pred_row_l:
+        # Fecha de referencia (6 meses hacia atrás), limitada entre 2022-01-01 y 2025-09-28
+        min_d = datetime.date(2022, 1, 1)
+        max_d = datetime.date(2025, 9, 28)
+        selected_date = st.date_input(
+            "Fecha de referencia (historial 6 meses hacia atrás)",
+            value=max_d,
+            min_value=min_d,
+            max_value=max_d,
+            key="pred_ref_date"
+        )
+    with pred_row_r:
+        # (Reservado para futuros controles si los necesitás)
+        pass
+    predict_clicked = st.button("Predecir", use_container_width=False)
+
+    if predict_clicked:
         try:
             # bloquear predicción si equipos iguales
             if not teams_different:
@@ -591,14 +1007,15 @@ with tab2:
                 if missing_in_df:
                     st.warning(f"Columnas esperadas que no están en el CSV: {missing_in_df}")
 
-            # intentar construir features históricas basadas en los equipos seleccionados
-            N_map = {'Gradiente': 6, 'Regresion': 9, 'Ridge': 9}
-            N = N_map.get(model_choice, 6)
+            # intentar construir features históricas basadas en ventana de 6 meses desde la fecha elegida
             try:
-                computed_features = build_match_features(df, sel_local, sel_visit, N)
+                df_source = st.session_state.get('df_source')
+                if df_source is None:
+                    df_source = pd.read_csv(DATA_PATH, dayfirst=True)
+                computed_features = build_match_features_by_date_window(df_source, sel_local, sel_visit, pd.to_datetime(selected_date), months_window=6)
             except Exception as e:
                 computed_features = {}
-                st.warning(f"No pude generar features históricas dinámicas: {e}")
+                st.warning(f"No pude generar features históricas dinámicas (6 meses): {e}")
 
             if computed_features:
                 # incorporar las features calculadas como overrides (tienen prioridad sobre medianas)
@@ -665,6 +1082,8 @@ with tab2:
                     )
             else:
                 st.info("El modelo no provee probabilidades (no implementa predict_proba). Se muestra la predicción númerica o de clase.")
+            
+            # Se elimina la visualización de importancia de features a pedido del usuario.
         except Exception as e:
             st.error(f"Error al predecir: {e}")
 
@@ -673,9 +1092,9 @@ with tab2:
 # =========================
 with tab3:
     st.markdown("""
-**Datos**: `data/df_grid_procesado_gradiente.csv`  
+**Datos**: `data/datos_procesados_modelo.csv`  
 **Visualizaciones**: Altair (interactivas, comparables, y con facetado)  
-**Modelo**: se intenta cargar automáticamente el archivo local asociado al tipo de modelo (p. ej. `modelo_final_gradiente.pkl`). Si no está presente, colocá el .pkl en `models/` o en la raíz del proyecto.
+**Modelo**: se intenta cargar automáticamente el archivo local asociado al tipo de modelo (p. ej. `modelo_final_random.pkl`). Si no está presente, colocá el .pkl en `models/` o en la raíz del proyecto.
 
 > Consejo: fijá en `requirements.txt` la **misma versión de scikit-learn** e **imbalanced-learn** con la que entrenaste el modelo para evitar incompatibilidades al cargar el .pkl.
 """)
