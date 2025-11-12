@@ -909,6 +909,7 @@ with tab2:
         # Panel izquierdo: equipo local seleccionado
         ldf, y_title_l, scale_l, fmt_l = _team_metric_df(df, sel_local, metric_key, side_choice, year_choice, matches_limit)
         if not ldf.empty:
+            c_left.markdown(f"**{metric_label} — {sel_local}**")
             if chart_type == 'Línea':
                 base_l = alt.Chart(ldf).mark_line()
             else:
@@ -920,7 +921,7 @@ with tab2:
                            color=alt.Color('home_away:N', title='Condición'),
                            tooltip=['date:T', 'home_away:N', 'oponente:N', alt.Tooltip('metric_value:Q', title=metric_label, format=fmt_l)]
                        )
-                       .properties(title=f"{metric_label} — {sel_local}", height=260))
+                       .properties(height=260))
             c_left.altair_chart(chart_l, use_container_width=True)
         else:
             c_left.info("Sin datos preprocesados para el equipo local seleccionado con el filtro actual.")
@@ -928,6 +929,7 @@ with tab2:
         # Panel derecho: equipo visitante seleccionado
         rdf, y_title_r, scale_r, fmt_r = _team_metric_df(df, sel_visit, metric_key, side_choice, year_choice, matches_limit)
         if not rdf.empty:
+            c_right.markdown(f"**{metric_label} — {sel_visit}**")
             if chart_type == 'Línea':
                 base_r = alt.Chart(rdf).mark_line()
             else:
@@ -939,7 +941,7 @@ with tab2:
                            color=alt.Color('home_away:N', title='Condición'),
                            tooltip=['date:T', 'home_away:N', 'oponente:N', alt.Tooltip('metric_value:Q', title=metric_label, format=fmt_r)]
                        )
-                       .properties(title=f"{metric_label} — {sel_visit}", height=260))
+                       .properties(height=260))
             c_right.altair_chart(chart_r, use_container_width=True)
         else:
             c_right.info("Sin datos preprocesados para el equipo visitante seleccionado con el filtro actual.")
