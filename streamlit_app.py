@@ -889,11 +889,10 @@ with tab2:
         "Partidos a mostrar",
         min_value=5,
         max_value=200,
-        value=int(st.session_state.get('matches_limit', 30)),
         step=5,
+        key="matches_limit",
         help="Limita cuántos partidos recientes se grafican en las tarjetas superiores"
     )
-    st.session_state['matches_limit'] = int(matches_limit_input)
 
     metric_map = {
         "Winrate": "winrate",
@@ -905,7 +904,7 @@ with tab2:
     metric_key = metric_map[metric_label]
 
     c_left, c_right = st.columns(2)
-    matches_limit = int(matches_limit_input)
+    matches_limit = int(st.session_state.get('matches_limit', matches_limit_input))
     if isinstance(sel_local, str) and sel_local and isinstance(sel_visit, str) and sel_visit and teams_different:
         # Panel izquierdo: equipo local seleccionado
         ldf, y_title_l, scale_l, fmt_l = _team_metric_df(df, sel_local, metric_key, side_choice, year_choice, matches_limit)
